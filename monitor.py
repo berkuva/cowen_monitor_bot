@@ -194,30 +194,36 @@ def notification_text(video: dict[str, str], summary: str) -> str:
     return text[:3900]
 
 
-def send_telegram(text: str) -> None:
+def send_telegram(text: str) -> bool:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     if not token or not chat_id:
-        return
+        return False
     endpoint = f"https://api.telegram.org/bot{token}/sendMessage"
     payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text}).encode("utf-8")
     request = urllib.request.Request(endpoint, data=payload, method="POST")
     try:
-        http_response = urllib.request.urlopen(request, timeout=30)
-        http_response.read()
+        with urllib.request.urlopen(request, timeout=30) as http_response:
+            response = json.loads(http_response.read().decode("utf-8"))
     except urllib.error.HTTPError as error:
         detail = error.read().decode("utf-8", errors="replace")[:500]
         raise RuntimeError(f"Telegram API error {error.code}: {detail}") from error
+    if not response.get("ok"):
+        raise RuntimeError(f"Telegram API rejected the message: {response}")
+    return True
 
 
-def send_email(text: str, video: dict[str, str]) -> None:
+def send_email(text: str, video: dict[str, str]) -> bool:
     host = os.getenv("SMTP_HOST", "").strip()
     username = os.getenv("SMTP_USERNAME", "").strip()
     password = os.getenv("SMTP_PASSWORD", "").strip()
     recipient = os.getenv("EMAIL_TO", "").strip()
     sender = os.getenv("EMAIL_FROM", username).strip()
-    if not all([host, username, password, recipient, sender]):
-        return
+    values = [host, username, password, recipient, sender]
+    if not any(values):
+        return False
+    if not all(values):
+        raise RuntimeError("SMTP/email configuration is incomplete")
     message = email.message.EmailMessage()
     message["Subject"] = f"Benjamin Cowen: {video['title']}"
     message["From"] = sender
@@ -227,7 +233,10 @@ def send_email(text: str, video: dict[str, str]) -> None:
     with smtplib.SMTP(host, port, timeout=30) as smtp:
         smtp.starttls()
         smtp.login(username, password)
-        smtp.send_message(message)
+        refused = smtp.send_message(message)
+    if refused:
+        raise RuntimeError(f"SMTP refused recipients: {refused}")
+    return True
 
 
 def ensure_notification_destination() -> None:
@@ -276,13 +285,19 @@ def main() -> int:
         transcript = get_transcript(video["url"])
         summary = summarize(video, transcript)
         text = notification_text(video, summary)
-        send_telegram(text)
-        send_email(text, video)
+        delivered = send_telegram(text)
+        delivered = send_email(text, video) or delivered
+        if not delivered:
+            raise RuntimeError(
+                f"No notification was delivered for {video['id']}; leaving it unmarked for retry"
+            )
         print(f"Sent summary for {video['id']}: {video['title']}")
         seen_ids.append(video["id"])
+        # Persist after every successful delivery so a later video failing in
+        # the same batch does not cause already-delivered videos to repeat.
+        state["seen_ids"] = seen_ids[-50:]
+        save_state(state)
 
-    state["seen_ids"] = seen_ids[-50:]
-    save_state(state)
     return 0
 
 
