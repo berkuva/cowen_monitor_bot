@@ -104,7 +104,8 @@ def clean_vtt(text: str) -> str:
 
 
 def get_transcript(video_url: str) -> str:
-    """Download English auto-captions when available; return empty on failure."""
+    """Download English captions, with a transcript-API fallback."""
+    video_id = urllib.parse.parse_qs(urllib.parse.urlparse(video_url).query).get("v", [""])[0]
     with tempfile.TemporaryDirectory() as directory:
         output_template = str(Path(directory) / "video.%(ext)s")
         command = [
@@ -125,14 +126,34 @@ def get_transcript(video_url: str) -> str:
         try:
             subprocess.run(command, check=False, capture_output=True, text=True, timeout=120)
         except (OSError, subprocess.TimeoutExpired):
-            return ""
+            pass
         candidates = sorted(Path(directory).glob("*.vtt"))
-        if not candidates:
-            return ""
+        if candidates:
+            try:
+                transcript = clean_vtt(
+                    candidates[0].read_text(encoding="utf-8", errors="ignore")
+                )
+                if transcript:
+                    return transcript
+            except OSError:
+                pass
+
+    # yt-dlp can fail when YouTube rejects a player client even though the
+    # transcript endpoint still exposes auto-generated captions.
+    if video_id:
         try:
-            return clean_vtt(candidates[0].read_text(encoding="utf-8", errors="ignore"))
-        except OSError:
-            return ""
+            from youtube_transcript_api import YouTubeTranscriptApi
+
+            snippets = YouTubeTranscriptApi().fetch(video_id, languages=["en"])
+            transcript = " ".join(
+                str(snippet.text).strip()
+                for snippet in snippets
+                if str(snippet.text).strip()
+            )
+            return transcript[:MAX_TRANSCRIPT_CHARS]
+        except Exception:
+            pass
+    return ""
 
 
 def summarize(video: dict[str, str], transcript: str) -> str:
@@ -184,7 +205,7 @@ Transcript (spoken content):
 """.strip()
     endpoint = (
         "https://generativelanguage.googleapis.com/v1beta/models/"
-        f"{urllib.parse.quote(MODEL, safe='')}:generateContent?key={urllib.parse.quote(api_key)}"
+        f"{urllib.parse.quote(MODEL, safe='')}:generateContent?key={urllib.parse.quote(api_key, safe='')}"
     )
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
