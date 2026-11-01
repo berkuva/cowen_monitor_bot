@@ -27,6 +27,17 @@ jobs:
       - name: Install caption downloader
         run: python -m pip install --disable-pip-version-check --quiet yt-dlp youtube-transcript-api
 
+      - name: Diagnose caption API
+        run: |
+          python - <<'PY'
+          from youtube_transcript_api import YouTubeTranscriptApi
+          try:
+              snippets = YouTubeTranscriptApi().fetch("VWU9sgbvnzw", languages=["en"])
+              print(f"caption_api_chars={sum(len(snippet.text) for snippet in snippets)}")
+          except Exception as error:
+              print(f"caption_api_error={type(error).__name__}: {error}")
+          PY
+
       - name: Check for new video and send summary
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
