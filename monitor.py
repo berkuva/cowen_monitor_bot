@@ -140,12 +140,34 @@ def summarize(video: dict[str, str], transcript: str) -> str:
     if not api_key:
         raise RuntimeError("GEMINI_API_KEY is not configured")
 
-    source = transcript or video.get("description", "")
-    if not source:
-        source = "No transcript or description was available. Summarize only what can be inferred from the title."
+    # The RSS description is usually a block of links, disclaimers, and scam
+    # warnings. It is metadata, not the spoken content of the video. Never
+    # present a description-only result as analysis of Cowen's video.
+    if not transcript.strip():
+        return (
+            "THESIS:\n"
+            "No substantive video summary is available because YouTube captions "
+            "could not be retrieved.\n\n"
+            "KEY POINTS:\n"
+            "- No spoken-content key points were verified.\n"
+            "- The available RSS text was excluded because it contains promotional "
+            "links, disclaimers, and social/scam notices rather than the video transcript.\n\n"
+            "PRICE / TIMING CLAIMS:\n"
+            "No claims could be verified without the transcript.\n\n"
+            "BIAS:\n"
+            "Not determinable from the available source.\n\n"
+            "RELEVANCE TO OUR HALVING-CYCLE ANALYSIS:\n"
+            "Do not update the cycle analysis based on this notification."
+        )
+
+    source = transcript
     prompt = f"""
 You are summarizing a newly published Benjamin Cowen Bitcoin/crypto video.
+Use only the transcript below as evidence. Do not use the title to invent content.
 Do not invent claims, quotes, prices, dates, or chart readings. Separate what Cowen says from your own inference.
+Do not treat promotional links, disclaimers, social links, or scam warnings as
+the video's analytical key points. If the transcript does not contain a claim,
+write "Not stated in the transcript."
 Return plain text with these headings:
 THESIS:
 KEY POINTS:
@@ -157,7 +179,7 @@ Video title: {video['title']}
 Published: {video['published']}
 URL: {video['url']}
 
-Transcript or description:
+Transcript (spoken content):
 {source}
 """.strip()
     endpoint = (
