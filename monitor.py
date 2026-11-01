@@ -104,7 +104,7 @@ def clean_vtt(text: str) -> str:
 
 
 def get_transcript(video_url: str) -> str:
-    """Download English captions, with a transcript-API fallback."""
+    """Download English captions, with hosted and direct fallbacks."""
     video_id = urllib.parse.parse_qs(urllib.parse.urlparse(video_url).query).get("v", [""])[0]
     with tempfile.TemporaryDirectory() as directory:
         output_template = str(Path(directory) / "video.%(ext)s")
@@ -137,6 +137,25 @@ def get_transcript(video_url: str) -> str:
                     return transcript
             except OSError:
                 pass
+
+    # GitHub Actions cloud IPs are commonly blocked by YouTube. Use a free
+    # hosted transcript endpoint before trying direct YouTube access again.
+    if video_id:
+        hosted_url = "https://api.freetranscriptapi.com/v1/transcript?" + urllib.parse.urlencode(
+            {"video_url": video_id, "lang": "en"}
+        )
+        try:
+            data = json.loads(http_get(hosted_url, timeout=30).decode("utf-8"))
+            snippets = data.get("transcript", [])
+            transcript = " ".join(
+                str(snippet.get("text", "")).strip()
+                for snippet in snippets
+                if isinstance(snippet, dict) and str(snippet.get("text", "")).strip()
+            )
+            if transcript:
+                return transcript[:MAX_TRANSCRIPT_CHARS]
+        except Exception:
+            pass
 
     # yt-dlp can fail when YouTube rejects a player client even though the
     # transcript endpoint still exposes auto-generated captions.
