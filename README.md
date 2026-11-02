@@ -1,8 +1,8 @@
 # Benjamin Cowen YouTube monitor
 
-This is a free cloud-based monitor that checks Benjamin Cowen's official YouTube RSS feed every 30 minutes using GitHub Actions. When a new video is found, it downloads English captions when available, summarizes the video with Gemini's free API tier, and sends the result to Telegram, email, or both.
+This is a free cloud-based monitor that checks Benjamin Cowen's official YouTube RSS feed every five minutes using GitHub Actions. When a new video is found, it downloads English captions when available, summarizes the video with Gemini's free API tier, and sends the result to Telegram, email, or both.
 
-The monitor does not require your computer to be on. GitHub Actions runs it in the cloud. Scheduled GitHub Actions jobs can be delayed occasionally, so this is a polling monitor rather than an instant webhook.
+The monitor does not require your computer to be on. GitHub Actions runs it in the cloud. Scheduled GitHub Actions jobs can still be delayed occasionally by GitHub, so this is a fast polling monitor rather than an instant webhook; the five-minute schedule is intended to keep notifications well within one hour under normal GitHub service conditions.
 
 ## Setup
 

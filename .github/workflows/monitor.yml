@@ -3,7 +3,8 @@ name: Benjamin Cowen YouTube monitor
 on:
   workflow_dispatch:
   schedule:
-    - cron: "*/30 * * * *"
+    # Poll every five minutes, offset from the hour to reduce GitHub scheduler congestion.
+    - cron: "3-59/5 * * * *"
 
 permissions:
   contents: write
