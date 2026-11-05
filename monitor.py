@@ -106,6 +106,27 @@ def clean_vtt(text: str) -> str:
 def get_transcript(video_url: str) -> str:
     """Download English captions, with hosted and direct fallbacks."""
     video_id = urllib.parse.parse_qs(urllib.parse.urlparse(video_url).query).get("v", [""])[0]
+
+    # Prefer a hosted caption extractor because GitHub Actions IPs are often
+    # blocked by YouTube. This endpoint currently returns both manual and
+    # auto-generated English caption tracks without requiring a secret.
+    if video_id:
+        hosted_url = "https://youtubegpt.ai/api/transcript?" + urllib.parse.urlencode(
+            {"v": video_id, "format": "json", "lang": "en"}
+        )
+        try:
+            data = json.loads(http_get(hosted_url, timeout=60).decode("utf-8"))
+            if data.get("ok"):
+                transcript = " ".join(
+                    str(segment.get("text", "")).strip()
+                    for segment in data.get("segments", [])
+                    if isinstance(segment, dict) and str(segment.get("text", "")).strip()
+                )
+                if transcript:
+                    return transcript[:MAX_TRANSCRIPT_CHARS]
+        except Exception:
+            pass
+
     with tempfile.TemporaryDirectory() as directory:
         output_template = str(Path(directory) / "video.%(ext)s")
         command = [
@@ -345,6 +366,15 @@ def main() -> int:
 
     for video in new_videos:
         transcript = get_transcript(video["url"])
+        if not transcript.strip():
+            # Captions may appear shortly after an upload, or a provider may
+            # be temporarily unavailable. Do not send a misleading empty
+            # summary and do not mark the video as seen; the next poll retries.
+            print(
+                f"Transcript unavailable for {video['id']}; "
+                "leaving it unmarked for a later retry."
+            )
+            continue
         summary = summarize(video, transcript)
         text = notification_text(video, summary)
         delivered = send_telegram(text)
