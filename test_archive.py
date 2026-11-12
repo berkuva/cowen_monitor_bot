@@ -123,6 +123,29 @@ class ArchiveTests(unittest.TestCase):
         self.assertEqual(bundle["errors"][0]["code"], "no_captions")
         self.assertEqual(bundle["errors"][0]["http_status"], 404)
 
+    def test_provider_rate_limit_preserves_retry_after(self):
+        progress = {"failures": {}}
+        error = backfill.CollectionError("Caption provider returned no transcript", stage="transcript",
+            code="http_error", details={"providers": [{"http_status": 429, "retry_after": "3600"}]})
+        backfill.defer(progress, video("abcdefghijk", None), error)
+        from datetime import datetime, timezone
+        failure = progress["failures"]["abcdefghijk"]
+        self.assertEqual(failure["http_status"], 429)
+        self.assertGreater((datetime.fromisoformat(failure["retry_after"]) - datetime.now(timezone.utc)).total_seconds(), 3500)
+
+    def test_legacy_failures_are_retried_under_fixed_parser(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive_store.write_json(Path(temp) / "catalog.json", {"target_year": 2026,
+                "groups": {"shorts": [video("abcdefghijk", None)]}})
+            archive_store.write_json(Path(temp) / "backfill.json", {"failures": {
+                "abcdefghijk": {"error_type": "RuntimeError", "retry_after": "2099-01-01"}}})
+            with patch.object(monitor, "http_get", return_value=b'<meta itemprop="datePublished" content="2026-10-30">'), \
+                 patch.object(monitor, "get_transcript", return_value={"text": "captions", "segments": []}), \
+                 patch.object(backfill.time, "sleep"):
+                backfill.run(temp, year=2026, batch_size=1)
+            self.assertIsNotNone(archive_store.Archive(temp).get("abcdefghijk"))
+            self.assertFalse(json.loads((Path(temp) / "backfill.json").read_text())["failures"])
+
     def test_live_upload_reuses_historical_transcript_and_still_sends_summary(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "archive"

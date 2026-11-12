@@ -169,6 +169,8 @@ def run(root, *, year, batch_size=3, seconds=160):
                         break
                     if published[:4] > str(year):
                         continue
+                    if progress.get("failures", {}).get(video["id"], {}).get("stage") == "publication_date":
+                        progress["failures"].pop(video["id"])
                     heads.append(video)
                 except Exception as error:
                     defer(progress, video, error, stage="publication_date")
@@ -181,8 +183,10 @@ def run(root, *, year, batch_size=3, seconds=160):
         try:
             bundle = monitor.get_transcript(video["url"], with_metadata=True, hosted_only=True)
             if not bundle["text"].strip():
+                errors = bundle.get("errors", [])
                 raise CollectionError("Caption provider returned no transcript", stage="transcript",
-                                      code="transcript_unavailable", details={"providers": bundle.get("errors", [])})
+                                      code=errors[0]["code"] if errors else "transcript_unavailable",
+                                      details={"providers": errors})
             record = archive.create(video, bundle, None, None)
             record["backfill_complete"] = True
             record["historical_email_requested"] = False
@@ -206,11 +210,14 @@ def run(root, *, year, batch_size=3, seconds=160):
 def defer(progress, video, error, *, stage="transcript"):
     previous = progress.setdefault("failures", {}).get(video["id"], {})
     attempts = previous.get("attempts", 0) + 1
-    status = error.code if isinstance(error, urllib.error.HTTPError) else None
+    providers = getattr(error, "details", {}).get("providers", [])
+    provider = providers[0] if providers else {}
+    status = error.code if isinstance(error, urllib.error.HTTPError) else provider.get("http_status")
     delay = min(360, 10 * 2 ** min(attempts - 1, 6))
     if status == 429:
         try:
-            delay = max(delay, int(error.headers.get("Retry-After", "0")) / 60)
+            delay = max(delay, int(error.headers.get("Retry-After", "0") if isinstance(error, urllib.error.HTTPError)
+                                   else provider.get("retry_after") or "0") / 60)
         except ValueError:
             pass
         delay = max(delay, 30)
