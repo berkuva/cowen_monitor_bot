@@ -14,6 +14,15 @@ The initial catalog contains full channel-tab inventories; records are created o
 
 This archives source captions, including automatic-caption errors. It does not interpret chart pixels or transcribe audio without captions. Existing inbox emails are not imported: historical records are transcripts, and future outgoing messages are retained from activation onward.
 
+## Ask questions in Codex
+
+The `cowen-archive` MCP server supplies citation-preserving transcript search and
+video context directly to Codex. It refreshes the private archive automatically,
+indexes new records incrementally, supports publication-date filters and historical
+comparisons, and needs no additional model API key. A command-line answer mode uses
+your signed-in Codex CLI and validates its source references before rendering citations.
+See [RAG.md](RAG.md) for setup, tools, example questions and limitations.
+
 ## Local retrieval / agent tool
 
 Clone the private dataset, then build a local index with Python's standard library:
