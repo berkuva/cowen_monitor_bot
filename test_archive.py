@@ -90,6 +90,39 @@ class ArchiveTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 backfill.publication_date(video("abcdefghijk", None))
 
+    def test_publication_date_watch_metadata_without_player(self):
+        pages = [b'<meta content="2026-10-30" itemprop="datePublished">',
+                 b'<script>var ytInitialData = {"contents":{"videoPrimaryInfoRenderer":'
+                 b'{"dateText":{"simpleText":"Streamed live on Oct 30, 2026"}}}};</script>']
+        for page in pages:
+            with self.subTest(page=page), patch.object(monitor, "http_get", return_value=page):
+                v = video("abcdefghijk", None)
+                self.assertEqual(backfill.publication_date(v), "2026-10-30")
+                self.assertEqual(v["published_precision"], "day")
+
+    def test_metadata_failure_records_cause_and_does_not_look_like_caption_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive_store.write_json(Path(temp) / "catalog.json", {"target_year": 2026,
+                "groups": {"streams": [video("abcdefghijk", None)]}})
+            with patch.object(monitor, "http_get", return_value=b'"playabilityStatus":{"status":"LOGIN_REQUIRED"} Sign in to confirm'), \
+                 patch.object(monitor, "get_transcript") as fetch:
+                backfill.run(temp, year=2026)
+            fetch.assert_not_called()
+            failure = json.loads((Path(temp) / "backfill.json").read_text())["failures"]["abcdefghijk"]
+            self.assertEqual(failure["stage"], "publication_date")
+            self.assertEqual(failure["code"], "date_unavailable")
+            self.assertEqual(failure["details"]["player_status"], "LOGIN_REQUIRED")
+
+    def test_hosted_provider_error_exposes_specific_code(self):
+        import io
+        import urllib.error
+        error = urllib.error.HTTPError("https://youtubegpt.ai/api/transcript", 404, "missing", {},
+                                       io.BytesIO(b'{"code":"no_captions","message":"No captions"}'))
+        with patch.object(monitor, "http_get", side_effect=error):
+            bundle = monitor.get_transcript(video("abcdefghijk", None)["url"], with_metadata=True, hosted_only=True)
+        self.assertEqual(bundle["errors"][0]["code"], "no_captions")
+        self.assertEqual(bundle["errors"][0]["http_status"], 404)
+
     def test_live_upload_reuses_historical_transcript_and_still_sends_summary(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / "archive"

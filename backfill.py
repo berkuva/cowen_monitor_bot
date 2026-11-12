@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 import json
@@ -11,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 
 from archive_store import Archive, now, write_json
 import monitor
@@ -51,19 +53,82 @@ def discover(root, year):
     return catalog
 
 
+class CollectionError(RuntimeError):
+    def __init__(self, message, *, stage, code, details=None):
+        super().__init__(message)
+        self.stage, self.code, self.details = stage, code, details or {}
+
+
+class DateTags(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.values = {}
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "meta" and attrs.get("itemprop") in ("datePublished", "uploadDate"):
+            self.values[attrs["itemprop"]] = attrs.get("content", "")
+
+
 def publication_date(video):
     if video.get("published"):
         return video["published"]
-    page = monitor.http_get(video["url"], timeout=20).decode("utf-8", errors="replace")
-    match = re.search(r'"publishDate"\s*:\s*"([^"\\]+)"', page)
-    if not match:
-        raise RuntimeError("Publication date unavailable; cannot verify year")
-    value = match[1]
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    video["published"] = parsed.astimezone(timezone.utc).isoformat() if parsed.tzinfo else value
-    video["published_source"] = "YouTube player microformat.publishDate"
-    video["published_precision"] = "day" if len(value) == 10 else "timestamp"
-    return video["published"]
+    page = monitor.http_get(video["url"] + "&hl=en", timeout=20).decode("utf-8", errors="replace")
+    candidates = []
+    for field in ("publishDate", "uploadDate"):
+        match = re.search(r'"' + field + r'"\s*:\s*"([^"\\]+)"', page)
+        if match:
+            candidates.append((match[1], "YouTube player microformat." + field))
+    tags = DateTags()
+    tags.feed(page)
+    candidates.extend((value, "YouTube watch meta." + field) for field, value in tags.values.items())
+    # Cloud watch pages may omit the player microformat while retaining the
+    # publication date in the video's primary information panel.
+    match = re.search(r'(?:var\s+)?ytInitialData\s*=\s*', page)
+    initial = {}
+    if match:
+        try:
+            initial, _ = json.JSONDecoder().raw_decode(page[match.end():])
+        except ValueError:
+            pass
+    def primary_dates(node):
+        if isinstance(node, dict):
+            primary = node.get("videoPrimaryInfoRenderer", {})
+            date = primary.get("dateText", {})
+            value = date.get("simpleText") or "".join(r.get("text", "") for r in date.get("runs", []))
+            if value:
+                yield value
+            for child in node.values():
+                yield from primary_dates(child)
+        elif isinstance(node, list):
+            for child in node:
+                yield from primary_dates(child)
+    primary = list(primary_dates(initial))
+    for value in primary:
+        match = re.search(r'([A-Z][a-z]{2,8} \d{1,2}, \d{4})', value)
+        if match:
+            for fmt in ("%b %d, %Y", "%B %d, %Y"):
+                try:
+                    candidates.append((datetime.strptime(match[1], fmt).date().isoformat(),
+                                       "YouTube videoPrimaryInfoRenderer.dateText"))
+                    break
+                except ValueError:
+                    pass
+    for value, source in candidates:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        video["published"] = parsed.astimezone(timezone.utc).isoformat() if parsed.tzinfo else value
+        video["published_source"] = source
+        video["published_precision"] = "day" if len(value) == 10 else "timestamp"
+        return video["published"]
+    status = re.search(r'"playabilityStatus"\s*:\s*\{\s*"status"\s*:\s*"([A-Z_]+)"', page)
+    raise CollectionError("YouTube watch page omitted a verifiable publication date", stage="publication_date",
+                          code="date_unavailable", details={"page_bytes": len(page),
+                          "player_status": status[1] if status else None,
+                          "primary_date_text": primary[:1],
+                          "bot_check": "Sign in to confirm" in page})
 
 
 def run(root, *, year, batch_size=3, seconds=160):
@@ -73,6 +138,12 @@ def run(root, *, year, batch_size=3, seconds=160):
     if catalog.get("target_year") != year:
         raise RuntimeError("Catalog year mismatch; explicitly discover a new catalog")
     progress = json.loads(progress_path.read_text()) if progress_path.exists() else {"failures": {}}
+    # Old entries lost their cause. Recheck each once under the new diagnostics;
+    # normal backoff still applies to newly classified errors.
+    for failure in progress.get("failures", {}).values():
+        if "stage" not in failure:
+            failure["retry_after"] = ""
+    date_attempts = 0
     deadline = time.monotonic() + seconds
     completed = attempts = 0
     heads = []
@@ -85,6 +156,12 @@ def run(root, *, year, batch_size=3, seconds=160):
                 failure = progress.get("failures", {}).get(video["id"], {})
                 if failure.get("retry_after", "") > now():
                     continue
+                if not video.get("published"):
+                    if date_attempts >= batch_size * 2 or time.monotonic() >= deadline:
+                        break
+                    if progress.get("date_lookup_retry_after", "") > now():
+                        break
+                    date_attempts += 1
                 try:
                     published = publication_date(video)
                     if published[:4] < str(year):
@@ -94,7 +171,7 @@ def run(root, *, year, batch_size=3, seconds=160):
                         continue
                     heads.append(video)
                 except Exception as error:
-                    defer(progress, video, error)
+                    defer(progress, video, error, stage="publication_date")
                 break
         write_json(catalog_path, catalog)
         if not heads:
@@ -104,7 +181,8 @@ def run(root, *, year, batch_size=3, seconds=160):
         try:
             bundle = monitor.get_transcript(video["url"], with_metadata=True, hosted_only=True)
             if not bundle["text"].strip():
-                raise RuntimeError("Transcript unavailable")
+                raise CollectionError("Caption provider returned no transcript", stage="transcript",
+                                      code="transcript_unavailable", details={"providers": bundle.get("errors", [])})
             record = archive.create(video, bundle, None, None)
             record["backfill_complete"] = True
             record["historical_email_requested"] = False
@@ -114,7 +192,7 @@ def run(root, *, year, batch_size=3, seconds=160):
             progress["last_success"] = {"video_id": video["id"], "at": now()}
             print(f"Archived {video['published']} {video['id']}: {len(bundle['text'])} characters")
         except Exception as error:
-            defer(progress, video, error)
+            defer(progress, video, error, stage="transcript")
         write_json(progress_path, progress)
         time.sleep(1)  # Modest sequential traffic to public extraction endpoints.
     progress["last_scan_at"] = now()
@@ -125,12 +203,26 @@ def run(root, *, year, batch_size=3, seconds=160):
     print(f"Saved {completed} transcripts this run. Total records: {progress['records']}.")
 
 
-def defer(progress, video, error):
-    progress.setdefault("failures", {})[video["id"]] = {
-        "error_type": type(error).__name__, "at": now(),
-        "retry_after": (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat(),
-    }
-    print(f"Deferred {video['id']}: {type(error).__name__}")
+def defer(progress, video, error, *, stage="transcript"):
+    previous = progress.setdefault("failures", {}).get(video["id"], {})
+    attempts = previous.get("attempts", 0) + 1
+    status = error.code if isinstance(error, urllib.error.HTTPError) else None
+    delay = min(360, 10 * 2 ** min(attempts - 1, 6))
+    if status == 429:
+        try:
+            delay = max(delay, int(error.headers.get("Retry-After", "0")) / 60)
+        except ValueError:
+            pass
+        delay = max(delay, 30)
+    failure = {"error_type": type(error).__name__, "stage": getattr(error, "stage", stage),
+               "code": getattr(error, "code", "request_failed"), "message": str(error)[:300],
+               "details": getattr(error, "details", {}), "http_status": status,
+               "attempts": attempts, "at": now(),
+               "retry_after": (datetime.now(timezone.utc) + timedelta(minutes=delay)).isoformat()}
+    progress["failures"][video["id"]] = failure
+    if status == 429 and stage == "publication_date":
+        progress["date_lookup_retry_after"] = failure["retry_after"]
+    print(f"Deferred {video['id']} [{failure['stage']}/{failure['code']}]: {failure['message']} {failure['details']}", flush=True)
 
 
 if __name__ == "__main__":

@@ -108,6 +108,7 @@ def get_transcript(video_url: str, *, with_metadata=False, hosted_only=False):
     """Download English captions, with hosted and direct fallbacks."""
     video_id = urllib.parse.parse_qs(urllib.parse.urlparse(video_url).query).get("v", [""])[0]
 
+    errors = []
     # Prefer a hosted caption extractor because GitHub Actions IPs are often
     # blocked by YouTube. This endpoint currently returns both manual and
     # auto-generated English caption tracks without requiring a secret.
@@ -130,13 +131,28 @@ def get_transcript(video_url: str, *, with_metadata=False, hosted_only=False):
                                 "segments": [{"text": str(s.get("text", "")), "start": s.get("start", 0) / 1000,
                                               "duration": (s.get("dur") or 0) / 1000} for s in data.get("segments", [])]}
                     return transcript
-        except Exception:
-            pass
+            errors.append({"provider": "youtubegpt.ai", "code": "invalid_or_empty_response"})
+        except urllib.error.HTTPError as error:
+            code = "http_error"
+            try:
+                payload = json.loads(error.read())
+                candidate = payload.get("code", "")
+                if isinstance(candidate, str) and re.fullmatch(r"[a-z_]{1,50}", candidate):
+                    code = candidate
+            except (ValueError, OSError):
+                pass
+            errors.append({"provider": "youtubegpt.ai", "code": code, "http_status": error.code,
+                           "retry_after": error.headers.get("Retry-After")})
+        except Exception as error:
+            errors.append({"provider": "youtubegpt.ai", "code": type(error).__name__})
 
     if hosted_only:
         # Keep each historical request bounded so new uploads are never stuck
         # behind long direct-YouTube retries on blocked cloud addresses.
-        return transcript_result("", None, with_metadata)
+        result = transcript_result("", None, with_metadata)
+        if with_metadata:
+            result["errors"] = errors
+        return result
 
     with tempfile.TemporaryDirectory() as directory:
         output_template = str(Path(directory) / "video.%(ext)s")
