@@ -189,6 +189,7 @@ class RagArchive:
         progress_path = self.root / "backfill.json"
         progress = json.loads(progress_path.read_text()) if progress_path.exists() else {}
         stats.update(indexed_at=indexed[0] if indexed else None, archive_last_scan=progress.get("last_scan_at"),
+                     collection_scope=progress.get("collection_scope"), records_by_year=progress.get("records_by_year", {}),
                      backfill_status=progress.get("status"), pending_recorded_failures=len(progress.get("failures", {})),
                      last_sync_attempt=self.last_sync_attempt, sync_warning=self.sync_warning,
                      retrieval_method="BM25 full-text retrieval, concept expansion, reciprocal-rank fusion and video diversity",

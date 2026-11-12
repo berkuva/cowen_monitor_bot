@@ -4,13 +4,30 @@ This is a free cloud-based monitor that checks Benjamin Cowen's official YouTube
 
 The monitor does not require your computer to be on. The configured cron-job.org job triggers it every ten minutes, with GitHub's cron as a backup. Caption availability and external provider outages can still delay a summary.
 
-## Private 2026 transcript dataset
+## Private 2021–2026 transcript dataset
 
 Source records live in the separate private repository `berkuva/cowen_video_archive`. Never commit transcripts, MIME emails, recipient addresses, or the retrieval database to this public code repository. A repository-scoped SSH deploy key in the `ARCHIVE_DEPLOY_KEY` Actions secret permits this workflow to write only to the private archive.
 
-New uploads are processed first. Their complete available transcript, summary and email body are saved in the private archive; the MIME email is saved when email delivery is attempted. Historical processing then resumes with up to three transcripts per invocation. It does not call Gemini and does not send individual historical summary emails. It covers videos published in 2026 across Videos, Streams and Shorts, newest first, using verified publication dates. Publication dates are checked against player metadata, watch-page date tags and the primary video date panel. Failed requests record their stage, specific cause and attempt count in `backfill.json`; retries back off from 10 minutes to six hours, respecting rate-limit cooldowns. Missing captions/dates remain pending and do not silently count as complete. Private, deleted and members-only videos cannot be promised.
+New uploads are processed first. Their complete available transcript, summary and email body are saved in the private archive; the MIME email is saved when email delivery is attempted. Historical processing then resumes with up to three transcripts per invocation. It does not call Gemini and does not send individual historical summary emails. It covers videos published in 2021–2026 across Videos, Streams and Shorts, newest first, using verified publication dates. Publication dates are checked against player metadata, watch-page date tags and the primary video date panel. Failed requests record their stage, specific cause and attempt count in `backfill.json`; retries back off from 10 minutes to six hours, respecting rate-limit cooldowns. Missing captions/dates remain pending and do not silently count as complete. Private, deleted and members-only videos cannot be promised.
 
-The initial catalog contains full channel-tab inventories; records are created only for the selected year. Timestamped captions, provider, language, automatic-caption flag, retrieval time and a transcript hash accompany each record. Text-only fallbacks have no fabricated timestamps. Full transcripts are retained without the old 45,000-character cutoff. Long future uploads are summarized in sections and then combined.
+The initial catalog contains full channel-tab inventories; historical records are
+created only for the configured date range. The cloud collector now covers
+January 1, 2021 through December 31, 2026, working backward from the newest uploads
+across Videos, Streams and Shorts. Expanding the range reuses the existing catalog,
+verified dates, transcripts, retry state and milestone delivery history.
+`backfill.json` stores `collection_scope`, `records_by_year`, and `records_in_scope`.
+An older single-year stopping point does not prevent collection of earlier years.
+
+Timestamped captions, provider, language, automatic-caption flag, retrieval time and
+a transcript hash accompany each record. Text-only fallbacks have no fabricated
+timestamps. Full transcripts are retained without the old 45,000-character cutoff.
+Long future uploads are summarized in sections and then combined.
+
+To run a range manually, use `python3 backfill.py run --archive private-archive
+--start-year 2021 --end-year 2026`. An exact inclusive lower date is also supported:
+`--start-date 2021-11-12 --end-year 2026`. Legacy `--year 2026` selects one year;
+do not combine it with range options. Existing source records are never deleted
+when the configured range changes.
 
 This archives source captions, including automatic-caption errors. It does not interpret chart pixels or transcribe audio without captions. Existing inbox emails are not imported: historical records are transcripts, and future outgoing messages are retained from activation onward.
 

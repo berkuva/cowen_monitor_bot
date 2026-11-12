@@ -85,6 +85,11 @@ Your Mac must be running to query its local MCP server. The cloud transcript
 collector and future-video email delivery continue independently when it is off.
 New transcripts become searchable at the next successful refresh.
 
+Historical backfill is configured for 2021–2026, newest first. Archive status
+includes the requested date range and collected counts by year. Expanding collection
+does not mean the earlier years are already complete; filter and cite only the
+transcripts that have actually been collected.
+
 Answers cover collected videos only. Check the returned video count, date span and
 backfill status; zero failures does not mean the historical archive is complete.
 Caption recognition errors remain possible. No chart pixels are interpreted.

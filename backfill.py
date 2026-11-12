@@ -1,10 +1,11 @@
-"""Continuously archive this year's public captions, newest first, without historical email."""
+"""Resume public transcript collection across a date range, newest first."""
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 from html.parser import HTMLParser
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
@@ -20,7 +21,24 @@ import monitor
 TABS = ("videos", "streams", "shorts")
 
 
-def discover(root, year):
+def collection_scope(*, year=None, start_year=None, end_year=None, start_date=None):
+    if year is not None:
+        if any(value is not None for value in (start_year, end_year, start_date)):
+            raise ValueError("Use --year alone or specify a year/date range")
+        start_year = end_year = year
+    else:
+        end_year = 2026 if end_year is None else end_year
+        start_year = (int(start_date[:4]) if start_date else 2021) if start_year is None else start_year
+    if not isinstance(start_year, int) or not isinstance(end_year, int) or not 1 <= start_year <= end_year <= 9998:
+        raise ValueError("Invalid collection year range")
+    lower = date.fromisoformat(start_date) if start_date else date(start_year, 1, 1)
+    if lower.year != start_year:
+        raise ValueError("Start date and start year disagree")
+    return {"start_year": start_year, "end_year": end_year, "start_date": lower.isoformat(),
+            "end_date": date(end_year, 12, 31).isoformat(), "order": "newest_first"}
+
+
+def discover(root, year=None, *, start_year=None, end_year=None, start_date=None):
     """Read complete channel tabs; the uploads playlist can silently stop at 100."""
     def tab_videos(tab):
         result = subprocess.run(
@@ -45,8 +63,9 @@ def discover(root, year):
         groups = dict(pool.map(tab_videos, TABS))
     if not any(groups.values()):
         raise RuntimeError("Channel enumeration returned no public uploads")
-    catalog = {"schema_version": 1, "channel_id": monitor.CHANNEL_ID,
-               "retrieved_at": now(), "target_year": year, "order": "newest_first_per_tab",
+    scope = collection_scope(year=year, start_year=start_year, end_year=end_year, start_date=start_date)
+    catalog = {"schema_version": 2, "channel_id": monitor.CHANNEL_ID,
+               "retrieved_at": now(), "collection_scope": scope, "order": "newest_first_per_tab",
                "scope": "public accessible videos, streams and shorts; private/deleted/member-only videos excluded",
                "groups": groups}
     write_json(Path(root) / "catalog.json", catalog)
@@ -131,13 +150,23 @@ def publication_date(video):
                           "bot_check": "Sign in to confirm" in page})
 
 
-def run(root, *, year, batch_size=3, seconds=160):
+def run(root, *, year=None, start_year=None, end_year=None, start_date=None, batch_size=3, seconds=160):
     archive = Archive(root)
+    scope = collection_scope(year=year, start_year=start_year, end_year=end_year, start_date=start_date)
     catalog_path, progress_path = archive.root / "catalog.json", archive.root / "backfill.json"
-    catalog = json.loads(catalog_path.read_text()) if catalog_path.exists() else discover(root, year)
-    if catalog.get("target_year") != year:
-        raise RuntimeError("Catalog year mismatch; explicitly discover a new catalog")
+    catalog = json.loads(catalog_path.read_text()) if catalog_path.exists() else discover(
+        root, start_year=scope["start_year"], end_year=scope["end_year"], start_date=scope["start_date"])
     progress = json.loads(progress_path.read_text()) if progress_path.exists() else {"failures": {}}
+    # The catalog already contains all years. Widen its scope in place, retaining
+    # verified dates, transcripts and retry checkpoints instead of rediscovering.
+    if progress.get("collection_scope") != scope:
+        progress["collection_scope"] = scope
+        progress["scope_changed_at"] = now()
+        progress.pop("year_boundaries", None)
+    catalog["schema_version"] = 2
+    catalog["collection_scope"] = scope
+    catalog.pop("target_year", None)
+    write_json(catalog_path, catalog)
     # Old entries lost their cause. Recheck each once under the new diagnostics;
     # normal backoff still applies to newly classified errors.
     for failure in progress.get("failures", {}).values():
@@ -164,10 +193,12 @@ def run(root, *, year, batch_size=3, seconds=160):
                     date_attempts += 1
                 try:
                     published = publication_date(video)
-                    if published[:4] < str(year):
-                        progress.setdefault("year_boundaries", {})[tab] = video["id"]
+                    if published[:10] < scope["start_date"]:
+                        progress.setdefault("year_boundaries", {})[tab] = {
+                            "video_id": video["id"], "published": published,
+                            "before": scope["start_date"]}
                         break
-                    if published[:4] > str(year):
+                    if published[:10] > scope["end_date"]:
                         continue
                     if progress.get("failures", {}).get(video["id"], {}).get("stage") == "publication_date":
                         progress["failures"].pop(video["id"])
@@ -200,7 +231,12 @@ def run(root, *, year, batch_size=3, seconds=160):
         write_json(progress_path, progress)
         time.sleep(1)  # Modest sequential traffic to public extraction endpoints.
     progress["last_scan_at"] = now()
-    progress["records"] = sum(1 for _ in archive.records())
+    records = list(archive.records())
+    progress["records"] = len(records)
+    progress["records_by_year"] = dict(sorted(Counter(
+        record["video"]["published"][:4] for record in records).items(), reverse=True))
+    progress["records_in_scope"] = sum(scope["start_date"] <= record["video"]["published"][:10] <= scope["end_date"]
+                                       for record in records)
     progress["completed_this_run"] = completed
     progress["status"] = "running_or_retrying" if heads else "at_year_boundaries_or_waiting_for_retries"
     write_json(progress_path, progress)
@@ -236,11 +272,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["discover", "run"])
     parser.add_argument("--archive", default=os.getenv("ARCHIVE_PATH", "private-archive"))
-    parser.add_argument("--year", type=int, default=int(os.getenv("BACKFILL_YEAR", "2026")))
+    parser.add_argument("--year", type=int, help="Legacy single-year mode; cannot be combined with a range")
+    parser.add_argument("--start-year", type=int)
+    parser.add_argument("--end-year", type=int)
+    parser.add_argument("--start-date", help="Optional inclusive lower date, YYYY-MM-DD")
     parser.add_argument("--batch-size", type=int, default=3)
     args = parser.parse_args()
     if args.command == "discover":
-        catalog = discover(args.archive, args.year)
+        catalog = discover(args.archive, args.year, start_year=args.start_year, end_year=args.end_year, start_date=args.start_date)
         print({key: len(value) for key, value in catalog["groups"].items()})
     else:
-        run(args.archive, year=args.year, batch_size=args.batch_size)
+        run(args.archive, year=args.year, start_year=args.start_year, end_year=args.end_year,
+            start_date=args.start_date, batch_size=args.batch_size)

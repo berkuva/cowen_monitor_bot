@@ -70,11 +70,11 @@ jobs:
             git push
           fi
 
-      - name: Resume 2026 transcript backfill (no historical emails)
+      - name: Resume 2021–2026 transcript backfill (no individual historical emails)
         if: success() && steps.archive.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 5
-        run: python backfill.py run --archive private-archive --year 2026 --batch-size 3
+        run: python backfill.py run --archive private-archive --start-year 2021 --end-year 2026 --batch-size 3
 
       - name: Verify release dates on every transcript
         id: date_audit
