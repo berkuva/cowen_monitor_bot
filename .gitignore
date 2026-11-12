@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .env
+# Source records and email addresses belong only in the separate private repository.
+private-archive/
+rag/
