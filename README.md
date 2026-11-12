@@ -8,11 +8,32 @@ The monitor does not require your computer to be on. The configured cron-job.org
 
 Source records live in the separate private repository `berkuva/cowen_video_archive`. Never commit transcripts, MIME emails, recipient addresses, or the retrieval database to this public code repository. A repository-scoped SSH deploy key in the `ARCHIVE_DEPLOY_KEY` Actions secret permits this workflow to write only to the private archive.
 
-New uploads are processed first. Their complete available transcript, summary and email body are saved in the private archive; the MIME email is saved when email delivery is attempted. Historical processing then resumes with up to three transcripts per invocation. It does not call Gemini and does not send historical email. It covers videos published in 2026 across Videos, Streams and Shorts, newest first, using verified publication dates. Publication dates are checked against player metadata, watch-page date tags and the primary video date panel. Failed requests record their stage, specific cause and attempt count in `backfill.json`; retries back off from 10 minutes to six hours, respecting rate-limit cooldowns. Missing captions/dates remain pending and do not silently count as complete. Private, deleted and members-only videos cannot be promised.
+New uploads are processed first. Their complete available transcript, summary and email body are saved in the private archive; the MIME email is saved when email delivery is attempted. Historical processing then resumes with up to three transcripts per invocation. It does not call Gemini and does not send individual historical summary emails. It covers videos published in 2026 across Videos, Streams and Shorts, newest first, using verified publication dates. Publication dates are checked against player metadata, watch-page date tags and the primary video date panel. Failed requests record their stage, specific cause and attempt count in `backfill.json`; retries back off from 10 minutes to six hours, respecting rate-limit cooldowns. Missing captions/dates remain pending and do not silently count as complete. Private, deleted and members-only videos cannot be promised.
 
 The initial catalog contains full channel-tab inventories; records are created only for the selected year. Timestamped captions, provider, language, automatic-caption flag, retrieval time and a transcript hash accompany each record. Text-only fallbacks have no fabricated timestamps. Full transcripts are retained without the old 45,000-character cutoff. Long future uploads are summarized in sections and then combined.
 
 This archives source captions, including automatic-caption errors. It does not interpret chart pixels or transcribe audio without captions. Existing inbox emails are not imported: historical records are transcripts, and future outgoing messages are retained from activation onward.
+
+## Transcript-count milestone emails and release dates
+
+The cloud workflow emails the configured `EMAIL_TO` at 100, 200, 300, and each
+subsequent hundred successfully saved, distinct video transcripts. Failed attempts,
+empty transcripts and records without valid release dates do not count. These are
+collection progress notices; historical videos still do not receive individual
+summary emails. Future-video summary delivery continues as before.
+
+Every saved source record includes `video.release_date` (YYYY-MM-DD), the original
+`video.published` date/timestamp, and `video.published_precision`. Day-only source
+dates remain day-only; a time is not invented. The workflow audits all records and
+upgrades older records and their RAG passages to include the explicit release date.
+
+The notification step runs after transcripts are committed to the private archive.
+`milestones.json` records delivered thresholds and pending retry state, while
+`milestone-emails/` retains the outgoing MIME messages. SMTP failures leave the
+threshold pending for the next cloud run. The existing SMTP secrets are reused.
+`release-date-audit.json` reports coverage and records requiring attention.
+
+Run checks with `python3 -m unittest test_milestones.py test_archive.py test_rag.py`.
 
 ## Ask questions in Codex
 

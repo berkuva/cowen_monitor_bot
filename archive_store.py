@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 from bisect import bisect_right
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 import hashlib
 import json
 import os
@@ -26,6 +26,22 @@ def write_json(path, value):
     temporary.replace(path)
 
 
+def release_metadata(video):
+    """Require a real publication date without inventing a time or timezone."""
+    if not isinstance(video, dict):
+        raise ValueError("Transcript requires video metadata")
+    value = video.get("published")
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}(?:T.+)?", value):
+        raise ValueError("Transcript requires a verified ISO publication date")
+    if len(value) == 10:
+        released = date.fromisoformat(value)
+        precision = "day"
+    else:
+        released = datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+        precision = "timestamp"
+    return {**video, "release_date": released.isoformat(), "published_precision": precision}
+
+
 class Archive:
     def __init__(self, root):
         self.root = Path(root)
@@ -40,6 +56,10 @@ class Archive:
         return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
 
     def save(self, record):
+        text = record.get("transcript", {}).get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Cannot save an empty transcript as a successful source record")
+        record["video"] = release_metadata(record["video"])
         write_json(self.path(record["video"]["id"]), record)
         passages = self.root / "passages" / (record["video"]["id"] + ".jsonl")
         passages.parent.mkdir(parents=True, exist_ok=True)
@@ -106,6 +126,8 @@ def make_chunk(video, number, text, start, end, kind):
         url += "&t=" + str(max(0, int(start))) + "s"
     return {"id": f"{video['id']}:{kind}:{number}", "video_id": video["id"],
             "title": video["title"], "published_at": video.get("published") or None,
+            "release_date": video.get("release_date") or (video.get("published") or "")[:10] or None,
+            "published_precision": video.get("published_precision"),
             "source_url": url, "kind": kind, "start_seconds": start,
             "end_seconds": end, "text": text}
 

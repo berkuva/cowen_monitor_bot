@@ -60,6 +60,7 @@ def fetch_feed() -> list[dict[str, str]]:
                     "id": video_id,
                     "title": title,
                     "published": published,
+                    "published_source": "YouTube RSS atom:published",
                     "updated": updated,
                     "url": link,
                     "description": description,
@@ -333,6 +334,12 @@ def send_telegram(text: str) -> bool:
 
 
 def send_email(text: str, video: dict[str, str], *, archive=None, historical=False) -> bool:
+    destination = archive.root / "emails" / (video["id"] + ".eml") if archive else None
+    return send_mail(text, f"Benjamin Cowen{' [Archive]' if historical else ''}: {video['title']}",
+                     destination=destination)
+
+
+def send_mail(text: str, subject: str, *, destination=None, message_id=None) -> bool:
     host = os.getenv("SMTP_HOST", "").strip()
     username = os.getenv("SMTP_USERNAME", "").strip()
     password = os.getenv("SMTP_PASSWORD", "").strip()
@@ -344,12 +351,14 @@ def send_email(text: str, video: dict[str, str], *, archive=None, historical=Fal
     if not all(values):
         raise RuntimeError("SMTP/email configuration is incomplete")
     message = email.message.EmailMessage()
-    message["Subject"] = f"Benjamin Cowen{' [Archive]' if historical else ''}: {video['title']}"
+    message["Subject"] = subject
+    if message_id:
+        message["Message-ID"] = message_id
     message["From"] = sender
     message["To"] = recipient
     message.set_content(text)
-    if archive:
-        destination = archive.root / "emails" / (video["id"] + ".eml")
+    if destination:
+        destination = Path(destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(message.as_bytes())
     port = int(os.getenv("SMTP_PORT", "587"))

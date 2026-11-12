@@ -76,7 +76,13 @@ jobs:
         timeout-minutes: 5
         run: python backfill.py run --archive private-archive --year 2026 --batch-size 3
 
+      - name: Verify release dates on every transcript
+        id: date_audit
+        if: always() && steps.archive.outcome == 'success'
+        run: python archive_milestones.py audit --archive private-archive
+
       - name: Save private transcripts and email records
+        id: archive_save
         if: always() && steps.archive.outcome == 'success'
         working-directory: private-archive
         run: |
@@ -85,5 +91,27 @@ jobs:
           git add -A
           if ! git diff --cached --quiet; then
             git commit -m "Archive Cowen source records and transcript progress"
+            git push
+          fi
+
+      - name: Email each 100 successful transcripts
+        if: always() && steps.archive_save.outcome == 'success' && steps.date_audit.outcome == 'success'
+        continue-on-error: true
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USERNAME: ${{ secrets.SMTP_USERNAME }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
+          EMAIL_TO: ${{ secrets.EMAIL_TO }}
+        run: python archive_milestones.py notify --archive private-archive
+
+      - name: Save milestone delivery checkpoint
+        if: always() && steps.archive_save.outcome == 'success'
+        working-directory: private-archive
+        run: |
+          git add -A
+          if ! git diff --cached --quiet; then
+            git commit -m "Save transcript milestone notification checkpoint"
             git push
           fi
