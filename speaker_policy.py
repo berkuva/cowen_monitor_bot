@@ -273,6 +273,7 @@ def clean(root, *, model_batches=0, seconds=100):
     write_json(root / POLICY_FILE, policy)
     unknown = [r for r in records.values() if decide(r["video"], r["transcript"]["text"], policy=policy)["label"] == "review"]
     reviewed = set()
+    review_error = None
     for _ in range(model_batches):
         if time.monotonic() >= deadline:
             break
@@ -293,6 +294,8 @@ def clean(root, *, model_batches=0, seconds=100):
         try:
             decisions = review_batch(batch)
         except Exception as error:
+            status = re.search(r"HTTP (\d{3})", str(error)) if isinstance(error, RuntimeError) else None
+            review_error = {"error_type": type(error).__name__, "http_status": int(status[1]) if status else None, "at": now()}
             print(f"Speaker review remains pending: {type(error).__name__}" +
                   (f" ({str(error)[:150]})" if isinstance(error, RuntimeError) else ""), flush=True)
             break
@@ -343,7 +346,7 @@ def clean(root, *, model_batches=0, seconds=100):
               "excluded_seen_this_run": counts["exclude"], "excluded_total": len(policy["removed"]),
               "removed_transcript_count": len(policy.get("deleted_transcripts", {})),
               "pending_review": counts["review"], "text_reviews_this_run": len(reviewed),
-              "clips_matched_to_ben_monologues": inherited}
+              "clips_matched_to_ben_monologues": inherited, "review_service_error": review_error}
     write_json(root / "speaker-audit.json", report)
     print(json.dumps(report), flush=True)
     return report

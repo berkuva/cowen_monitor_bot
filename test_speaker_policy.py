@@ -95,6 +95,17 @@ class SpeakerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Archive(root).create(video(), bundle("Unidentified voice"), None, None)
 
+    def test_review_outage_preserves_held_transcript_and_reports_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            Archive(root).create(video(), bundle("An unidentified speaker gives a short analysis."), None, None)
+            with patch.object(policy, "review_batch", side_effect=RuntimeError("Speaker review API HTTP 503")):
+                report = policy.clean(root, model_batches=1)
+            self.assertEqual(report["review_service_error"]["http_status"], 503)
+            self.assertEqual(report["retained"], 0)
+            self.assertEqual(report["pending_review"], 1)
+            self.assertTrue((root / "speaker-review/records/abcdefghijk.json").exists())
+
     def test_cleanup_rejects_mismatched_ids_before_removing_any_transcript(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
