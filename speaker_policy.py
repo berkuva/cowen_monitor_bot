@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import time
+import math
 from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.parse
@@ -16,6 +17,7 @@ import urllib.request
 
 CHANNEL_ID = "UCRvqjQPSeaWn-uEx-w0XOIg"
 POLICY_VERSION = 1
+REVIEW_FORMAT_VERSION = 2
 POLICY_FILE = "speaker-policy.json"
 
 
@@ -59,7 +61,7 @@ def decide(video, text, *, policy=None):
         return decision
     signature = fingerprint(video, text)
     cached = (policy or {}).get("decisions", {}).get(video["id"], {})
-    if cached.get("fingerprint") == signature and cached.get("method") == "gemini_full_text_review":
+    if cached.get("fingerprint") == signature and cached.get("method") in ("gemini_full_text_review", "matching_ben_solo_parent"):
         return cached
     head = text[:5000]
     guest_patterns = (
@@ -96,7 +98,68 @@ def remember(root, video, text, decision):
 def eligible(record, root):
     if not enabled(root):
         return True
-    return decide(record["video"], record["transcript"]["text"], policy=load_policy(root))["label"] == "ben_solo"
+    policy = load_policy(root)
+    decision = decide(record["video"], record["transcript"]["text"], policy=policy)
+    if decision["label"] != "ben_solo":
+        return False
+    if decision.get("method") == "matching_ben_solo_parent":
+        if not re.fullmatch(r"[A-Za-z0-9_-]{11}", decision.get("parent_id", "")):
+            return False
+        parent = Path(root) / "records" / (decision["parent_id"] + ".json")
+        if not parent.exists():
+            return False
+        source = json.loads(parent.read_text())
+        if fingerprint(source["video"], source["transcript"]["text"]) != decision["parent_fingerprint"]:
+            return False
+        return decide(source["video"], source["transcript"]["text"], policy=policy).get("method") == "transcript_format"
+    return True
+
+
+def match_solo_clips(records, policy):
+    """Use substantial spoken-text overlap with an admitted Ben monologue."""
+    from archive_store import now
+    for video_id, cached in list(policy["decisions"].items()):
+        if cached.get("method") != "matching_ben_solo_parent":
+            continue
+        parent = records.get(cached.get("parent_id"))
+        if not parent or fingerprint(parent["video"], parent["transcript"]["text"]) != cached.get("parent_fingerprint"):
+            policy["decisions"].pop(video_id)
+    parents, index = {}, {}
+    for r in records.values():
+        decision = decide(r["video"], r["transcript"]["text"], policy=policy)
+        if decision["label"] != "ben_solo" or decision["method"] != "transcript_format":
+            continue
+        video_id = r["video"]["id"]
+        parents[video_id] = r
+        words = re.findall(r"\w+", r["transcript"]["text"].casefold())
+        for offset in range(0, len(words) - 11, 8):
+            index.setdefault(" ".join(words[offset:offset + 12]), set()).add(video_id)
+    matched = 0
+    for r in records.values():
+        if decide(r["video"], r["transcript"]["text"], policy=policy)["label"] != "review":
+            continue
+        words = re.findall(r"\w+", r["transcript"]["text"].casefold())
+        if not 35 <= len(words) <= 2000:
+            continue
+        coverage = {}
+        for offset in range(len(words) - 11):
+            for parent_id in index.get(" ".join(words[offset:offset + 12]), ()):
+                coverage.setdefault(parent_id, set()).update(range(offset, offset + 12))
+        if not coverage:
+            continue
+        parent_id = max(coverage, key=lambda key: len(coverage[key]))
+        fraction = len(coverage[parent_id]) / len(words)
+        if fraction < .65:
+            continue
+        parent = parents[parent_id]
+        policy["decisions"][r["video"]["id"]] = {
+            "label": "ben_solo", "reason": "Substantial spoken-text overlap with an admitted Ben-only monologue",
+            "method": "matching_ben_solo_parent", "parent_id": parent_id,
+            "parent_fingerprint": fingerprint(parent["video"], parent["transcript"]["text"]),
+            "overlap_fraction": round(fraction, 3), "fingerprint": fingerprint(r["video"], r["transcript"]["text"]),
+            "reviewed_at": now(), "identity_basis": "text_provenance_not_voice_biometrics"}
+        matched += 1
+    return matched
 
 
 def stage_review(root, record):
@@ -174,11 +237,18 @@ Include exactly one decision per input ID. Use confidence >=0.9 only with clear 
         if label not in ("ben_solo", "exclude", "review"):
             raise ValueError("Invalid speaker classification")
         text = source[d["id"]]["transcript"]["text"]
-        if label != "review" and (not isinstance(d.get("confidence"), (int, float)) or
-                                  d["confidence"] < .9 or len(evidence) < 12 or evidence not in text):
+        normalize = lambda s: " ".join(re.findall(r"\w+", s.casefold()))
+        confidence = d.get("confidence")
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not math.isfinite(confidence):
+            confidence = None
+        evidence_valid = isinstance(evidence, str) and len(evidence) >= 12 and len(normalize(evidence).split()) >= 3 and normalize(evidence) in normalize(text)
+        if label != "review" and (confidence is None or
+                                  confidence < .9 or not evidence_valid):
             label = "review"
         validated[d["id"]] = {"label": label, "reason": str(d.get("reason", ""))[:300],
                                "method": "gemini_full_text_review", "model": model,
+                               "confidence": confidence, "evidence_verified": evidence_valid,
+                               "review_format_version": REVIEW_FORMAT_VERSION,
                                "identity_basis": "text_and_official_channel_not_voice_biometrics"}
     return validated
 
@@ -189,14 +259,18 @@ def clean(root, *, model_batches=0, seconds=100):
     policy = load_policy(root)
     write_json(root / POLICY_FILE, policy)
     records = {}
-    for directory in (root / "records", root / "speaker-review" / "records"):
+    for directory in (root / "speaker-review" / "records", root / "records"):
         for path in directory.glob("*.json"):
             record = json.loads(path.read_text())
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", record["video"].get("id", "")) or record["video"]["id"] != path.stem:
+                raise ValueError("Speaker cleanup requires a matching, valid video ID and filename")
             # Existing records came from this collector's official-channel feed
             # and inventory; backfill and future feed entries store this explicitly.
             record["video"].setdefault("channel_id", CHANNEL_ID)
             records[record["video"]["id"]] = record
     deadline = time.monotonic() + seconds
+    inherited = match_solo_clips(records, policy)
+    write_json(root / POLICY_FILE, policy)
     unknown = [r for r in records.values() if decide(r["video"], r["transcript"]["text"], policy=policy)["label"] == "review"]
     reviewed = set()
     for _ in range(model_batches):
@@ -206,7 +280,7 @@ def clean(root, *, model_batches=0, seconds=100):
         for r in unknown:
             length = len(r["transcript"]["text"])
             cached = policy["decisions"].get(r["video"]["id"], {})
-            if cached.get("next_review_after", "") > datetime.now(timezone.utc).isoformat():
+            if cached.get("review_format_version") == REVIEW_FORMAT_VERSION and cached.get("next_review_after", "") > datetime.now(timezone.utc).isoformat():
                 continue
             if r["video"]["id"] in reviewed or length > 60000 or size + length > 60000:
                 continue
@@ -219,7 +293,8 @@ def clean(root, *, model_batches=0, seconds=100):
         try:
             decisions = review_batch(batch)
         except Exception as error:
-            print(f"Speaker review remains pending: {type(error).__name__}", flush=True)
+            print(f"Speaker review remains pending: {type(error).__name__}" +
+                  (f" ({str(error)[:150]})" if isinstance(error, RuntimeError) else ""), flush=True)
             break
         for r in batch:
             video_id = r["video"]["id"]
@@ -230,7 +305,8 @@ def clean(root, *, model_batches=0, seconds=100):
             reviewed.add(video_id)
         write_json(root / POLICY_FILE, policy)
     counts = Counter()
-    for video_id, record in records.items():
+    ordered = sorted(records.items(), key=lambda item: decide(item[1]["video"], item[1]["transcript"]["text"], policy=policy).get("method") != "transcript_format")
+    for video_id, record in ordered:
         decision = decide(record["video"], record["transcript"]["text"], policy=policy)
         counts[decision["label"]] += 1
         active = root / "records" / (video_id + ".json")
@@ -266,7 +342,8 @@ def clean(root, *, model_batches=0, seconds=100):
     report = {"checked_at": now(), "policy": "ben_solo_only", "retained": counts["ben_solo"],
               "excluded_seen_this_run": counts["exclude"], "excluded_total": len(policy["removed"]),
               "removed_transcript_count": len(policy.get("deleted_transcripts", {})),
-              "pending_review": counts["review"], "text_reviews_this_run": len(reviewed)}
+              "pending_review": counts["review"], "text_reviews_this_run": len(reviewed),
+              "clips_matched_to_ben_monologues": inherited}
     write_json(root / "speaker-audit.json", report)
     print(json.dumps(report), flush=True)
     return report

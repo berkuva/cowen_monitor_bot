@@ -148,10 +148,15 @@ class RagArchive:
             present = set()
             policy_path = self.root / "speaker-policy.json"
             policy_signature = str(policy_path.stat().st_mtime_ns) if policy_path.exists() else "none"
+            policy = json.loads(policy_path.read_text()) if policy_path.exists() else {}
             for path in sorted((self.root / "records").glob("*.json")):
                 video_id = identifier(path.stem)
                 stat = path.stat()
                 signature = f"{VERSION}:{policy_signature}:{stat.st_size}:{stat.st_mtime_ns}"
+                decision = policy.get("decisions", {}).get(video_id, {})
+                if decision.get("method") == "matching_ben_solo_parent":
+                    parent = self.root / "records" / (decision["parent_id"] + ".json")
+                    signature += ":parent:" + (str(parent.stat().st_mtime_ns) if parent.exists() else "missing")
                 if previous.get(video_id) == signature:
                     present.add(video_id)
                     continue
@@ -194,8 +199,11 @@ class RagArchive:
         db.close()
         progress_path = self.root / "backfill.json"
         progress = json.loads(progress_path.read_text()) if progress_path.exists() else {}
+        speaker_path = self.root / "speaker-audit.json"
+        speaker_status = json.loads(speaker_path.read_text()) if speaker_path.exists() else None
         stats.update(indexed_at=indexed[0] if indexed else None, archive_last_scan=progress.get("last_scan_at"),
                      collection_scope=progress.get("collection_scope"), records_by_year=progress.get("records_by_year", {}),
+                     speaker_policy=speaker_status,
                      backfill_status=progress.get("status"), pending_recorded_failures=len(progress.get("failures", {})),
                      last_sync_attempt=self.last_sync_attempt, sync_warning=self.sync_warning,
                      retrieval_method="BM25 full-text retrieval, concept expansion, reciprocal-rank fusion and video diversity",

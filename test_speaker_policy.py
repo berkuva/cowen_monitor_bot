@@ -95,6 +95,35 @@ class SpeakerTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 Archive(root).create(video(), bundle("Unidentified voice"), None, None)
 
+    def test_cleanup_rejects_mismatched_ids_before_removing_any_transcript(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            record = Archive(root).create(video(), bundle(), None, None)
+            record["video"]["id"] = "../outside"
+            write_json(root / "records" / "abcdefghijk.json", record)
+            with self.assertRaises(ValueError):
+                policy.clean(root)
+            self.assertTrue((root / "records" / "abcdefghijk.json").exists())
+
+    def test_clip_matches_admitted_monologue_and_parent_edits_invalidate_it(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            archive = Archive(root)
+            words = [f"distinctiveword{i}" for i in range(200)]
+            archive.create(video(), bundle(BEN + " " + " ".join(words)), None, None)
+            archive.create(video("lmnopqrstuv", "A clipped analysis"), bundle(" ".join(words[60:150])), None, None)
+            report = policy.clean(root)
+            self.assertEqual(report["clips_matched_to_ben_monologues"], 1)
+            self.assertEqual(report["retained"], 2)
+            self.assertEqual(report["pending_review"], 0)
+            rag = RagArchive(root)
+            self.assertEqual(rag.status()["videos"], 2)
+            archive.create(video(), bundle(BEN), None, None)
+            self.assertEqual(rag.status()["videos"], 1)
+            report = policy.clean(root)
+            self.assertEqual(report["pending_review"], 1)
+            self.assertIsNone(archive.get("lmnopqrstuv"))
+
     def test_model_output_requires_matching_ids_confidence_and_real_evidence(self):
         record = {"video": video(), "transcript": bundle("My Bitcoin dominance analysis is unchanged.")}
         def response(decisions):

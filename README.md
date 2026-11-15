@@ -23,6 +23,10 @@ review. This is text-based speaker inference, not audio/voice verification. Unce
 or oversized clips are held under `speaker-review/records/`, outside active records,
 RAG passages and milestone counts. They are not labeled as confirmed other speakers.
 
+Clips can also be admitted when at least 65% of their spoken text matches an already
+admitted Ben-only monologue in substantial word sequences. The parent video and its
+transcript fingerprint are recorded; changes or removal invalidate this support.
+
 Confirmed excluded transcripts, derived passages and saved per-video email copies
 are removed from the current dataset. An ID/reason audit is retained without the
 excluded full transcript. Git history is preserved. Speaker review can restore an
