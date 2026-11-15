@@ -8,6 +8,38 @@ The monitor does not require your computer to be on. The configured cron-job.org
 
 Source records live in the separate private repository `berkuva/cowen_video_archive`. Never commit transcripts, MIME emails, recipient addresses, or the retrieval database to this public code repository. A repository-scoped SSH deploy key in the `ARCHIVE_DEPLOY_KEY` Actions secret permits this workflow to write only to the private archive.
 
+### Ben-only speaker policy and ongoing uploads
+
+The deployed archive accepts Ben Cowen speaking alone. It excludes NFA Live
+multi-host episodes, interviews, guest collaborations, panels, other speakers and
+entertainment clips. A solo livestream reading written audience questions is allowed;
+the word `live` or a caption `>>` marker alone does not establish another speaker.
+
+`speaker-policy.json` stores versioned decisions tied to a fingerprint of the full
+transcript and source metadata. Clear solo introductions and conversation cues are
+checked locally. Unclear clips receive bounded, full-text Gemini classification using
+the existing configured key/model. No transcript is silently truncated for speaker
+review. This is text-based speaker inference, not audio/voice verification. Uncertain
+or oversized clips are held under `speaker-review/records/`, outside active records,
+RAG passages and milestone counts. They are not labeled as confirmed other speakers.
+
+Confirmed excluded transcripts, derived passages and saved per-video email copies
+are removed from the current dataset. An ID/reason audit is retained without the
+excluded full transcript. Git history is preserved. Speaker review can restore an
+approved clip to the active archive or delete a confirmed excluded held clip.
+`speaker-audit.json` reports retained, removed and pending-review totals.
+
+Every observed RSS upload is merged into the catalog's `recent` group. A durable
+`pending_uploads` queue retains uploads after they leave YouTube's limited RSS feed.
+Eligible transcripts are saved before summary generation or email delivery, so Gemini
+or SMTP outages do not discard sources. New-upload notifications are filtered by the
+same speaker policy. Historical collection continues even if summary delivery fails.
+The existing 2021–2026 inventory is retained while new uploads are added continuously.
+
+Speaker cleanup also filters archive exports and the local RAG index. Existing
+milestone delivery history is retained; future counts reflect the eligible active
+archive and can decrease when previously included conversations are removed.
+
 New uploads are processed first. Their complete available transcript, summary and email body are saved in the private archive; the MIME email is saved when email delivery is attempted. Historical processing then resumes with up to three transcripts per invocation. It does not call Gemini and does not send individual historical summary emails. It covers videos published in 2021–2026 across Videos, Streams and Shorts, newest first, using verified publication dates. Publication dates are checked against player metadata, watch-page date tags and the primary video date panel. Failed requests record their stage, specific cause and attempt count in `backfill.json`; retries back off from 10 minutes to six hours, respecting rate-limit cooldowns. Missing captions/dates remain pending and do not silently count as complete. Private, deleted and members-only videos cannot be promised.
 
 The initial catalog contains full channel-tab inventories; historical records are
@@ -50,7 +82,7 @@ The notification step runs after transcripts are committed to the private archiv
 threshold pending for the next cloud run. The existing SMTP secrets are reused.
 `release-date-audit.json` reports coverage and records requiring attention.
 
-Run checks with `python3 -m unittest test_milestones.py test_archive.py test_rag.py`.
+Run checks with `python3 -m unittest test_speaker_policy.py test_backfill_range.py test_milestones.py test_archive.py test_rag.py`.
 
 ## Ask questions in Codex
 

@@ -17,6 +17,7 @@ import urllib.error
 
 from archive_store import Archive, now, write_json
 import monitor
+import speaker_policy
 
 TABS = ("videos", "streams", "shorts")
 
@@ -178,8 +179,17 @@ def run(root, *, year=None, start_year=None, end_year=None, start_date=None, bat
     heads = []
     while completed < batch_size and attempts < batch_size * 3 and time.monotonic() < deadline:
         heads = []
+        policy = speaker_policy.load_policy(root) if speaker_policy.enabled(root) else None
         for tab, videos in catalog["groups"].items():
             for video in videos:
+                if policy is not None:
+                    if video["id"] in policy["removed"] or (archive.root / "speaker-review" / "records" / (video["id"] + ".json")).exists():
+                        continue
+                    excluded = speaker_policy.metadata_decision(video)
+                    if excluded:
+                        speaker_policy.exclude(root, video, excluded["reason"])
+                        policy["removed"][video["id"]] = excluded
+                        continue
                 if archive.get(video["id"]):
                     continue
                 failure = progress.get("failures", {}).get(video["id"], {})
@@ -218,6 +228,9 @@ def run(root, *, year=None, start_year=None, end_year=None, start_date=None, bat
                 raise CollectionError("Caption provider returned no transcript", stage="transcript",
                                       code=errors[0]["code"] if errors else "transcript_unavailable",
                                       details={"providers": errors})
+            if not speaker_policy.admit(root, video, bundle):
+                print(f"Source {video['id']} excluded or held for speaker review", flush=True)
+                continue
             record = archive.create(video, bundle, None, None)
             record["backfill_complete"] = True
             record["historical_email_requested"] = False

@@ -19,6 +19,9 @@ def audit(root, *, repair=False):
     for path in sorted((archive.root / "records").glob("*.json")):
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
+            from speaker_policy import eligible
+            if not eligible(record, archive.root):
+                continue
             video = release_metadata(record["video"])
             text = record["transcript"]["text"]
             if archive.path(video["id"]) != path or not isinstance(text, str) or not text.strip():

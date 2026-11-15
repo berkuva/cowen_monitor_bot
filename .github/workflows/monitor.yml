@@ -16,7 +16,7 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 9
+    timeout-minutes: 12
     env:
       ARCHIVE_CONFIGURED: ${{ secrets.ARCHIVE_DEPLOY_KEY != '' }}
       ARCHIVE_PATH: private-archive
@@ -42,7 +42,13 @@ jobs:
           ssh-key: ${{ secrets.ARCHIVE_DEPLOY_KEY }}
           path: private-archive
 
+      - name: Enforce Ben-only archive speaker policy
+        if: steps.archive.outcome == 'success'
+        run: python speaker_policy.py --archive private-archive
+
       - name: Check for new video and send summary
+        if: env.ARCHIVE_CONFIGURED != 'true' || steps.archive.outcome == 'success'
+        continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           SEND_LATEST_ON_FIRST_RUN: "true"
@@ -71,10 +77,18 @@ jobs:
           fi
 
       - name: Resume 2021–2026 transcript backfill (no individual historical emails)
-        if: success() && steps.archive.outcome == 'success'
+        if: always() && steps.archive.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 5
         run: python backfill.py run --archive private-archive --start-year 2021 --end-year 2026 --batch-size 3
+
+      - name: Review uncertain speakers and remove excluded transcript sources
+        if: always() && steps.archive.outcome == 'success'
+        timeout-minutes: 3
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: gemini-3.5-flash-lite
+        run: python speaker_policy.py --archive private-archive --model-batches 8 --seconds 100
 
       - name: Verify release dates on every transcript
         id: date_audit

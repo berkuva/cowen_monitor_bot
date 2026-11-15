@@ -53,13 +53,23 @@ class Archive:
 
     def get(self, video_id):
         path = self.path(video_id)
-        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        record = json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        if record:
+            from speaker_policy import eligible
+            if not eligible(record, self.root):
+                return None
+        return record
 
     def save(self, record):
         text = record.get("transcript", {}).get("text")
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Cannot save an empty transcript as a successful source record")
         record["video"] = release_metadata(record["video"])
+        from speaker_policy import eligible, enabled, decide, load_policy
+        if not eligible(record, self.root):
+            raise ValueError("Speaker policy excludes this source or requires speaker review")
+        if enabled(self.root):
+            record["speaker_filter"] = {"version": 1, **decide(record["video"], text, policy=load_policy(self.root))}
         write_json(self.path(record["video"]["id"]), record)
         passages = self.root / "passages" / (record["video"]["id"] + ".jsonl")
         passages.parent.mkdir(parents=True, exist_ok=True)
@@ -82,7 +92,10 @@ class Archive:
 
     def records(self):
         for path in sorted((self.root / "records").glob("*.json")):
-            yield json.loads(path.read_text(encoding="utf-8"))
+            record = json.loads(path.read_text(encoding="utf-8"))
+            from speaker_policy import eligible
+            if eligible(record, self.root):
+                yield record
 
 
 def chunks(record, max_chars=1800, overlap=200):

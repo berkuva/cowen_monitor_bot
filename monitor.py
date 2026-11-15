@@ -58,6 +58,7 @@ def fetch_feed() -> list[dict[str, str]]:
             videos.append(
                 {
                     "id": video_id,
+                    "channel_id": CHANNEL_ID,
                     "title": title,
                     "published": published,
                     "published_source": "YouTube RSS atom:published",
@@ -396,8 +397,6 @@ def main() -> int:
     if not videos:
         raise RuntimeError("YouTube RSS feed returned no videos")
 
-    ensure_notification_destination()
-
     state = load_state()
     archive_root = os.getenv("ARCHIVE_PATH", "").strip()
     archive = Archive(archive_root) if archive_root and Path(archive_root, ".git").exists() else None
@@ -409,48 +408,83 @@ def main() -> int:
         save_state(state)
         print(f"Initialized state at latest video: {videos[0]['id']}")
         return 0
-
-    new_videos = [video for video in reversed(videos) if video["id"] not in seen_set]
+    from recent_uploads import merge_recent
+    import speaker_policy
+    pending = state.setdefault("pending_uploads", {})
+    skipped = set(state.get("speaker_filtered_ids", []))
+    for video in videos:
+        if video["id"] not in seen_set and video["id"] not in skipped:
+            pending[video["id"]] = video
+    for video_id in list(pending):
+        if video_id in seen_set or video_id in skipped:
+            pending.pop(video_id)
+    if archive:
+        merge_recent(archive.root, [*videos, *pending.values()])
+    save_state(state)  # Retain uploads even after they leave the short RSS feed.
+    new_videos = sorted(pending.values(), key=lambda v: v.get("published") or "")
     if not new_videos:
         print("No new Benjamin Cowen videos.")
         return 0
-
+    try:
+        ensure_notification_destination()
+        notifications_enabled = True
+    except RuntimeError:
+        notifications_enabled = False
+    failed = False
     for video in new_videos:
-        cached = archive.get(video["id"]) if archive else None
-        bundle = cached["transcript"] if cached else get_transcript(video["url"], with_metadata=True)
-        transcript = bundle["text"]
-        if not transcript.strip():
-            # Captions may appear shortly after an upload, or a provider may
-            # be temporarily unavailable. Do not send a misleading empty
-            # summary and do not mark the video as seen; the next poll retries.
-            print(
-                f"Transcript unavailable for {video['id']}; "
-                "leaving it unmarked for a later retry."
-            )
-            continue
-        cached_summary = cached.get("summary", {}).get("text") if cached else None
-        summary = cached_summary or summarize(video, transcript)
-        text = notification_text(video, summary)
-        record = cached if cached_summary else (archive.create(video, bundle, summary, text) if archive else None)
-        delivered = send_telegram(text)
-        email_delivered = send_email(text, video, archive=archive)
-        delivered = email_delivered or delivered
-        if not delivered:
-            raise RuntimeError(
-                f"No notification was delivered for {video['id']}; leaving it unmarked for retry"
-            )
-        print(f"Sent summary for {video['id']}: {video['title']}")
-        if archive:
-            record["email"]["sent_at"] = now() if email_delivered else None
-            record["live_notification_delivered"] = True
-            archive.save(record)
-        seen_ids.append(video["id"])
-        # Persist after every successful delivery so a later video failing in
-        # the same batch does not cause already-delivered videos to repeat.
-        state["seen_ids"] = seen_ids[-50:]
-        save_state(state)
-
-    return 0
+        try:
+            if archive and speaker_policy.enabled(archive.root):
+                policy = speaker_policy.load_policy(archive.root)
+                excluded = speaker_policy.metadata_decision(video)
+                if excluded or video["id"] in policy["removed"]:
+                    if excluded:
+                        speaker_policy.exclude(archive.root, video, excluded["reason"])
+                    skipped.add(video["id"])
+                    pending.pop(video["id"], None)
+                    state["speaker_filtered_ids"] = sorted(skipped)
+                    save_state(state)
+                    continue
+                if (archive.root / "speaker-review" / "records" / (video["id"] + ".json")).exists():
+                    continue
+            cached = archive.get(video["id"]) if archive else None
+            bundle = cached["transcript"] if cached else get_transcript(video["url"], with_metadata=True)
+            transcript = bundle["text"]
+            if not transcript.strip():
+                print(f"Transcript unavailable for {video['id']}; kept in the durable upload queue.")
+                continue
+            if archive and not speaker_policy.admit(archive.root, video, bundle):
+                continue
+            # Save the complete eligible transcript BEFORE generation/delivery.
+            # A Gemini or SMTP outage cannot discard the source or lose its ID.
+            record = cached or (archive.create(video, bundle, None, None) if archive else None)
+            if not notifications_enabled:
+                failed = True
+                continue
+            cached_summary = record.get("summary", {}).get("text") if record else None
+            summary = cached_summary or summarize(video, transcript)
+            text = notification_text(video, summary)
+            if archive:
+                record["summary"].update(text=summary, model=MODEL, generated_at=now())
+                record["email"]["body"] = text
+                archive.save(record)
+            delivered = send_telegram(text)
+            email_delivered = send_email(text, video, archive=archive)
+            if not (email_delivered or delivered):
+                raise RuntimeError("No summary notification was delivered")
+            if archive:
+                record["email"]["sent_at"] = now() if email_delivered else None
+                record["live_notification_delivered"] = True
+                archive.save(record)
+            seen_ids.append(video["id"])
+            pending.pop(video["id"], None)
+            state["seen_ids"] = seen_ids[-50:]
+            save_state(state)
+            print(f"Sent summary for {video['id']}: {video['title']}")
+        except Exception as error:
+            failed = True
+            print(f"Upload {video['id']} remains pending: {type(error).__name__}", flush=True)
+    save_state(state)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

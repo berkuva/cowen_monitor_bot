@@ -90,6 +90,13 @@ includes the requested date range and collected counts by year. Expanding collec
 does not mean the earlier years are already complete; filter and cite only the
 transcripts that have actually been collected.
 
+The active corpus is Ben speaking alone. Multi-host conversations, interviews and
+other speakers are removed; uncertain clips stay outside search while speaker review
+is pending. The index removes excluded IDs on refresh and checks the current speaker
+policy before indexing source records. This uses transcript/metadata inference, not
+audio identification. Caption markers and the word "live" alone do not exclude a
+Ben-only livestream.
+
 Answers cover collected videos only. Check the returned video count, date span and
 backfill status; zero failures does not mean the historical archive is complete.
 Caption recognition errors remain possible. No chart pixels are interpreted.
