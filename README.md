@@ -58,6 +58,9 @@ They remain incomplete and are checked again daily without purchasing access.
 Speaker review accepts one full transcript up to 120,000 characters, so
 60–120k-character solo streams are no longer
 permanently skipped by the smaller multi-video batching limit.
+Transient speaker-review errors (429/5xx and network failures) receive at most two
+bounded backoff retries. Invalid credentials are not retried, and an unavailable
+review service leaves the complete source held outside active RAG evidence.
 
 Speaker cleanup also filters archive exports and the local RAG index. Existing
 milestone delivery history is retained; future counts reflect the eligible active

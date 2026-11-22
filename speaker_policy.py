@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import time
 import math
+import random
 from datetime import datetime, timedelta, timezone
 import urllib.error
 import urllib.parse
@@ -220,11 +221,27 @@ Include exactly one decision per input ID. Use confidence >=0.9 only with clear 
                "generationConfig": {"temperature": 0, "maxOutputTokens": 8000, "responseMimeType": "application/json"}}
     request = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                      headers={"Content-Type": "application/json", "x-goog-api-key": key}, method="POST")
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            data = json.load(response)
-    except urllib.error.HTTPError as error:
-        raise RuntimeError(f"Speaker review API HTTP {error.code}") from None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=30) as response:
+                data = json.load(response)
+            break
+        except urllib.error.HTTPError as error:
+            if error.code not in (408, 429, 500, 502, 503, 504) or attempt == 2:
+                raise RuntimeError(f"Speaker review API HTTP {error.code}") from None
+            try:
+                requested_delay = float(error.headers.get("Retry-After", 0))
+            except (ValueError, TypeError):
+                requested_delay = 0
+            if requested_delay > 20:
+                raise RuntimeError(f"Speaker review API HTTP {error.code}; retry deferred") from None
+            delay = max(2 ** attempt, requested_delay)
+            print(f"Speaker review temporarily unavailable (HTTP {error.code}); bounded retry {attempt + 1}/2", flush=True)
+            time.sleep(delay + random.uniform(0, 1))
+        except (urllib.error.URLError, TimeoutError):
+            if attempt == 2:
+                raise RuntimeError("Speaker review temporary network failure") from None
+            time.sleep(2 ** attempt + random.uniform(0, 1))
     parts = data.get("candidates", [{}])[0].get("content", {}).get("parts", [])
     result = json.loads("".join(p.get("text", "") for p in parts))
     source = {r["video"]["id"]: r for r in records}

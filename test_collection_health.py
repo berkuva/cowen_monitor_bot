@@ -21,6 +21,30 @@ def video(vid="abcdefghijk", date="2026-11-04"):
 
 
 class CollectionHealthTests(unittest.TestCase):
+    def test_speaker_review_retries_503_then_validates_complete_response(self):
+        record={'video':video(),'transcript':{'text':'My Bitcoin dominance analysis is unchanged.'}}
+        decision={'id':'abcdefghijk','label':'ben_solo','confidence':.99,'reason':'Ben context',
+                  'evidence':'Bitcoin dominance analysis is unchanged.'}
+        data={'candidates':[{'content':{'parts':[{'text':json.dumps({'decisions':[decision]})}]}}]}
+        error=urllib.error.HTTPError('https://generativelanguage.googleapis.com',503,'Unavailable',{},None)
+        with patch.dict('os.environ',{'GEMINI_API_KEY':'placeholder'}), \
+             patch('speaker_policy.urllib.request.urlopen',side_effect=[error,io.BytesIO(json.dumps(data).encode())]) as request, \
+             patch('speaker_policy.time.sleep') as sleep:
+            result=speaker_policy.review_batch([record])
+        self.assertEqual(request.call_count,2)
+        sleep.assert_called_once()
+        self.assertEqual(result['abcdefghijk']['label'],'ben_solo')
+
+    def test_speaker_review_does_not_retry_bad_credentials_or_loop_forever(self):
+        record={'video':video(),'transcript':{'text':'Bitcoin dominance analysis.'}}
+        for code,attempts,headers in [(403,1,{}),(503,3,{}),(429,1,{'Retry-After':'120'})]:
+            error=urllib.error.HTTPError('https://generativelanguage.googleapis.com',code,'Error',headers,None)
+            with patch.dict('os.environ',{'GEMINI_API_KEY':'placeholder'}), \
+                 patch('speaker_policy.urllib.request.urlopen',side_effect=error) as request, \
+                 patch('speaker_policy.time.sleep'):
+                with self.assertRaises(RuntimeError):speaker_policy.review_batch([record])
+            self.assertEqual(request.call_count,attempts)
+
     def test_members_only_error_does_not_attempt_other_download_paths(self):
         payload=json.dumps({'code':'unplayable','message':'Join this channel for members-only content.'}).encode()
         error=urllib.error.HTTPError('https://youtubegpt.ai',451,'Unavailable',{},io.BytesIO(payload))
