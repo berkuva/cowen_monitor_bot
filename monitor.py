@@ -136,19 +136,24 @@ def get_transcript(video_url: str, *, with_metadata=False, hosted_only=False):
             errors.append({"provider": "youtubegpt.ai", "code": "invalid_or_empty_response"})
         except urllib.error.HTTPError as error:
             code = "http_error"
+            restriction = None
             try:
                 payload = json.loads(error.read())
                 candidate = payload.get("code", "")
                 if isinstance(candidate, str) and re.fullmatch(r"[a-z_]{1,50}", candidate):
                     code = candidate
+                message = str(payload.get("message", "")).lower()
+                if code == "unplayable" and ("members-only" in message or "private video" in message):
+                    restriction = "members_only" if "members-only" in message else "private_video"
+                    code = "access_restricted"
             except (ValueError, OSError):
                 pass
             errors.append({"provider": "youtubegpt.ai", "code": code, "http_status": error.code,
-                           "retry_after": error.headers.get("Retry-After")})
+                           "retry_after": error.headers.get("Retry-After"), "restriction": restriction})
         except Exception as error:
             errors.append({"provider": "youtubegpt.ai", "code": type(error).__name__})
 
-    if hosted_only:
+    if hosted_only or any(e.get("code") == "access_restricted" for e in errors):
         # Keep each historical request bounded so new uploads are never stuck
         # behind long direct-YouTube retries on blocked cloud addresses.
         result = transcript_result("", None, with_metadata)

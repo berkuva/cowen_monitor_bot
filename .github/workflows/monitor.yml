@@ -2,6 +2,11 @@ name: Benjamin Cowen YouTube monitor
 
 on:
   workflow_dispatch:
+    inputs:
+      force_inventory_check:
+        description: Recheck recent channel tabs now
+        type: boolean
+        default: false
   schedule:
     # Poll every five minutes, offset from the hour to reduce GitHub scheduler congestion.
     - cron: "3-59/5 * * * *"
@@ -46,6 +51,19 @@ jobs:
         if: steps.archive.outcome == 'success'
         run: python speaker_policy.py --archive private-archive
 
+      - name: Reconcile recent uploads against all channel tabs
+        if: steps.archive.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 3
+        env:
+          FORCE_CHECK: ${{ inputs.force_inventory_check }}
+        run: |
+          if [ "$FORCE_CHECK" = "true" ]; then
+            python recent_uploads.py reconcile --archive private-archive --since 2026-11-01 --force
+          else
+            python recent_uploads.py reconcile --archive private-archive --since 2026-11-01
+          fi
+
       - name: Check for new video and send summary
         if: env.ARCHIVE_CONFIGURED != 'true' || steps.archive.outcome == 'success'
         continue-on-error: true
@@ -80,7 +98,7 @@ jobs:
         if: always() && steps.archive.outcome == 'success'
         continue-on-error: true
         timeout-minutes: 5
-        run: python backfill.py run --archive private-archive --start-year 2021 --end-year 2026 --batch-size 3
+        run: python backfill.py run --archive private-archive --start-year 2021 --batch-size 3
 
       - name: Review uncertain speakers and remove excluded transcript sources
         if: always() && steps.archive.outcome == 'success'
@@ -94,6 +112,12 @@ jobs:
         id: date_audit
         if: always() && steps.archive.outcome == 'success'
         run: python archive_milestones.py audit --archive private-archive
+
+      - name: Reconcile retries and audit uploads since activation
+        if: always() && steps.archive.outcome == 'success'
+        run: |
+          python collection_health.py --archive private-archive
+          python recent_uploads.py coverage --archive private-archive --since 2026-11-01
 
       - name: Save private transcripts and email records
         id: archive_save

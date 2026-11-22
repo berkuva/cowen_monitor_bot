@@ -40,6 +40,25 @@ or SMTP outages do not discard sources. New-upload notifications are filtered by
 same speaker policy. Historical collection continues even if summary delivery fails.
 The existing 2021–2026 inventory is retained while new uploads are added continuously.
 
+The collector also reconciles the newest Videos, Streams and Shorts inventories
+every six hours, independently of the short RSS feed. A manual workflow run can
+force this check. New IDs are retained even if their release dates need retrying;
+`recent-upload-audit.json` accounts for every known upload since 2026-11-01 as saved,
+speaker-excluded, speaker-review-pending or missing. Inventory failures are reported,
+and a missing continuity anchor expands the next scan instead of claiming coverage.
+
+Retry bookkeeping is reconciled against the actual eligible archive and held
+transcripts. Old errors are retained in `resolved_failures` with their disposition
+instead of counting already-saved videos as failures. Provider-reported missing
+captions remain incomplete in `caption_unavailable` and are checked again daily;
+they are never counted as successful transcripts.
+Members-only/private source responses are tracked separately as `access_restricted`;
+the downloader does not attempt other download paths after an explicit restriction.
+They remain incomplete and are checked again daily without purchasing access.
+Speaker review accepts one full transcript up to 120,000 characters, so
+60–120k-character solo streams are no longer
+permanently skipped by the smaller multi-video batching limit.
+
 Speaker cleanup also filters archive exports and the local RAG index. Existing
 milestone delivery history is retained; future counts reflect the eligible active
 archive and can decrease when previously included conversations are removed.
@@ -53,6 +72,8 @@ across Videos, Streams and Shorts. Expanding the range reuses the existing catal
 verified dates, transcripts, retry state and milestone delivery history.
 `backfill.json` stores `collection_scope`, `records_by_year`, and `records_in_scope`.
 An older single-year stopping point does not prevent collection of earlier years.
+The cloud workflow's upper year follows the current UTC year, so ongoing collection
+does not stop at December 2026. The explicit 2021 lower bound remains in place.
 
 Timestamped captions, provider, language, automatic-caption flag, retrieval time and
 a transcript hash accompany each record. Text-only fallbacks have no fabricated

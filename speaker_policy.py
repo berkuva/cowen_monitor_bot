@@ -283,7 +283,16 @@ def clean(root, *, model_batches=0, seconds=100):
             cached = policy["decisions"].get(r["video"]["id"], {})
             if cached.get("review_format_version") == REVIEW_FORMAT_VERSION and cached.get("next_review_after", "") > datetime.now(timezone.utc).isoformat():
                 continue
-            if r["video"]["id"] in reviewed or length > 60000 or size + length > 60000:
+            # Review a long solo livestream in full rather than starving it
+            # forever behind the ordinary 60k-character multi-video batch cap.
+            if r["video"]["id"] in reviewed or length > 120000:
+                continue
+            if length > 60000:
+                if batch:
+                    continue
+                batch.append(r)
+                break
+            if size + length > 60000:
                 continue
             batch.append(r)
             size += length
@@ -338,9 +347,8 @@ def clean(root, *, model_batches=0, seconds=100):
         progress["records_by_year"] = dict(Counter(r["video"]["published"][:4] for r in active_records))
         scope = progress.get("collection_scope", {})
         progress["records_in_scope"] = sum(scope.get("start_date", "") <= r["video"]["published"][:10] <= scope.get("end_date", "9999") for r in active_records)
-        for video_id in list(progress.get("failures", {})):
-            if video_id in policy["removed"]:
-                progress["failures"].pop(video_id)
+        from collection_health import reconcile
+        reconcile(root, progress)
         write_json(progress_path, progress)
     report = {"checked_at": now(), "policy": "ben_solo_only", "retained": counts["ben_solo"],
               "excluded_seen_this_run": counts["exclude"], "excluded_total": len(policy["removed"]),

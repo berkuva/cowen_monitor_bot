@@ -28,7 +28,7 @@ def collection_scope(*, year=None, start_year=None, end_year=None, start_date=No
             raise ValueError("Use --year alone or specify a year/date range")
         start_year = end_year = year
     else:
-        end_year = 2026 if end_year is None else end_year
+        end_year = datetime.now(timezone.utc).year if end_year is None else end_year
         start_year = (int(start_date[:4]) if start_date else 2021) if start_year is None else start_year
     if not isinstance(start_year, int) or not isinstance(end_year, int) or not 1 <= start_year <= end_year <= 9998:
         raise ValueError("Invalid collection year range")
@@ -158,6 +158,8 @@ def run(root, *, year=None, start_year=None, end_year=None, start_date=None, bat
     catalog = json.loads(catalog_path.read_text()) if catalog_path.exists() else discover(
         root, start_year=scope["start_year"], end_year=scope["end_year"], start_date=scope["start_date"])
     progress = json.loads(progress_path.read_text()) if progress_path.exists() else {"failures": {}}
+    from collection_health import reconcile
+    reconcile(root, progress)
     # The catalog already contains all years. Widen its scope in place, retaining
     # verified dates, transcripts and retry checkpoints instead of rediscovering.
     if progress.get("collection_scope") != scope:
@@ -192,7 +194,9 @@ def run(root, *, year=None, start_year=None, end_year=None, start_date=None, bat
                         continue
                 if archive.get(video["id"]):
                     continue
-                failure = progress.get("failures", {}).get(video["id"], {})
+                failure = (progress.get("failures", {}).get(video["id"]) or
+                           progress.get("caption_unavailable", {}).get(video["id"]) or
+                           progress.get("access_restricted", {}).get(video["id"], {}))
                 if failure.get("retry_after", "") > now():
                     continue
                 if not video.get("published"):
@@ -237,6 +241,8 @@ def run(root, *, year=None, start_year=None, end_year=None, start_date=None, bat
             archive.save(record)
             completed += 1
             progress.setdefault("failures", {}).pop(video["id"], None)
+            progress.setdefault("caption_unavailable", {}).pop(video["id"], None)
+            progress.setdefault("access_restricted", {}).pop(video["id"], None)
             progress["last_success"] = {"video_id": video["id"], "at": now()}
             print(f"Archived {video['published']} {video['id']}: {len(bundle['text'])} characters")
         except Exception as error:
@@ -252,12 +258,15 @@ def run(root, *, year=None, start_year=None, end_year=None, start_date=None, bat
                                        for record in records)
     progress["completed_this_run"] = completed
     progress["status"] = "running_or_retrying" if heads else "at_year_boundaries_or_waiting_for_retries"
+    reconcile(root, progress)
     write_json(progress_path, progress)
     print(f"Saved {completed} transcripts this run. Total records: {progress['records']}.")
 
 
 def defer(progress, video, error, *, stage="transcript"):
-    previous = progress.setdefault("failures", {}).get(video["id"], {})
+    previous = (progress.setdefault("failures", {}).get(video["id"]) or
+                progress.get("caption_unavailable", {}).get(video["id"]) or
+                progress.get("access_restricted", {}).get(video["id"], {}))
     attempts = previous.get("attempts", 0) + 1
     providers = getattr(error, "details", {}).get("providers", [])
     provider = providers[0] if providers else {}
@@ -275,7 +284,21 @@ def defer(progress, video, error, *, stage="transcript"):
                "details": getattr(error, "details", {}), "http_status": status,
                "attempts": attempts, "at": now(),
                "retry_after": (datetime.now(timezone.utc) + timedelta(minutes=delay)).isoformat()}
-    progress["failures"][video["id"]] = failure
+    if failure["code"] == "access_restricted":
+        failure["retry_after"] = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        progress.setdefault("access_restricted", {})[video["id"]] = failure
+        progress["failures"].pop(video["id"], None)
+        progress.setdefault("caption_unavailable", {}).pop(video["id"], None)
+    elif failure["code"] == "no_captions":
+        failure["availability_basis"] = "caption_provider_report; not a completed transcript"
+        failure["retry_after"] = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+        progress.setdefault("caption_unavailable", {})[video["id"]] = failure
+        progress["failures"].pop(video["id"], None)
+        progress.setdefault("access_restricted", {}).pop(video["id"], None)
+    else:
+        progress["failures"][video["id"]] = failure
+        progress.setdefault("caption_unavailable", {}).pop(video["id"], None)
+        progress.setdefault("access_restricted", {}).pop(video["id"], None)
     if status == 429 and stage == "publication_date":
         progress["date_lookup_retry_after"] = failure["retry_after"]
     print(f"Deferred {video['id']} [{failure['stage']}/{failure['code']}]: {failure['message']} {failure['details']}", flush=True)
